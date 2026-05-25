@@ -1,0 +1,103 @@
+services:
+  postgresql:
+    image: postgres:15
+    container_name: ml_postgresql
+    environment:
+      POSTGRES_DB: ml_db
+      POSTGRES_USER: ml_user
+      POSTGRES_PASSWORD: ml_user
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init/postgres:/docker-entrypoint-initdb.d
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ml_user -d ml_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      
+  minio:
+    image: minio/minio:latest
+    container_name: ml_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.5.0
+    container_name: ml_mlflow
+    ports:
+      - "5001:5000"
+    environment:
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root s3://mlflow-artifacts
+      --allowed-hosts "mlflow:5000,localhost:5001,127.0.0.1:5001"
+
+  jupyter:
+    build: ./jupyter
+    container_name: ml_jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_TOKEN: "12345"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ml_db
+      POSTGRES_USER: ml_user
+      POSTGRES_PASSWORD: ml_user
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+    depends_on:
+      - postgresql
+      - mlflow
+      - minio
+  
+  superset:
+    image: apache/superset:latest-dev
+    container_name: ml_superset
+    ports:
+      - "8088:8088"
+    environment:
+      DATABASE_DIALECT: postgresql
+      DATABASE_HOST: postgresql
+      DATABASE_PORT: 5432
+      DATABASE_DB: ml_db
+      DATABASE_USER: ml_user
+      DATABASE_PASSWORD: ml_user
+      SUPERSET_SECRET_KEY: superset123
+    volumes:
+      - superset_data:/app/superset_home
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    command: >
+      bash -c "
+      superset db upgrade &&
+      superset init &&
+      superset fab create-admin --username admin --firstname admin --lastname admin --email admin@localhost --password admin || true &&
+      superset run -h 0.0.0.0 -p 8088
+      "
+
+volumes:
+  minio_data:
+  postgres_data:
+  superset_data:
